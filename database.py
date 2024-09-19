@@ -2,7 +2,7 @@
 Database File
 Copyright 2023-2024 tohid.jk
 License GNU GPLv2 or later
-2024-09-06
+2024-09-19
 """
 
 
@@ -14,20 +14,20 @@ import io
 import json
 import csv
 
-import lzma as compression # lzma,bz2,gzip,zlib
 import crypt as encryption
+import lzma, bz2, gzip, zlib # compression
 
 
 class Database(typing.Dict):
     def __init__(self,
         fileName: str,
-        compress: bool = False,
         password: str = None,
+        compression = None,
         saveAtExit: bool = True
     ):
         self.fileName = fileName
-        self.compress = compress
         self.password = password
+        self.compression = compression
         self.saveAtExit = saveAtExit
 
         if os.path.isfile(self.fileName):
@@ -36,7 +36,7 @@ class Database(typing.Dict):
         if self.saveAtExit:
             atexit.register(self.write)
 
-    def readfile(self) -> str:
+    def readFile(self) -> str:
         data = None
         with open(self.fileName, "rb") as file:
             data = file.read()
@@ -44,16 +44,16 @@ class Database(typing.Dict):
         if self.password != None:
             data = encryption.decrypt(data, self.password)
 
-        if self.compress:
-            data = compression.decompress(data)
+        if self.compression != None:
+            data = self.compression.decompress(data)
 
         return data.decode()
 
-    def writefile(self, data: str) -> None:
+    def writeFile(self, data: str) -> None:
         data = data.encode()
 
-        if self.compress:
-            data = compression.compress(data)
+        if self.compression != None:
+            data = self.compression.compress(data)
 
         if self.password != None:
             data = encryption.encrypt(data, self.password)
@@ -63,10 +63,10 @@ class Database(typing.Dict):
 
     def read(self) -> None:
         self.clear()
-        self.update(eval(self.readfile()))
+        self.update(eval(self.readFile()))
 
     def write(self) -> None:
-        self.writefile(self.__str__())
+        self.writeFile(self.__str__())
 
     def commit(self) -> None:
         self.write()
@@ -74,24 +74,24 @@ class Database(typing.Dict):
 class DatabaseJSON(Database):
     def read(self) -> None:
         self.clear()
-        self.update(json.loads(self.readfile()))
+        self.update(json.loads(self.readFile()))
 
     def write(self) -> None:
-        self.writefile(json.dumps(self, indent="\t"))
+        self.writeFile(json.dumps(self, indent="\t"))
 
 class DatabaseCSV(Database):
     def read(self) -> None:
-        buffer = io.StringIO(self.readfile())
-        csvreader = csv.reader(buffer)
-        self.headers = next(csvreader, list())
-        self.data = list(csvreader)
+        buffer = io.StringIO(self.readFile())
+        csvReader = csv.reader(buffer)
+        self.headers = next(csvReader, list())
+        self.data = list(csvReader)
 
     def write(self) -> None:
         buffer = io.StringIO()
-        csvwriter = csv.writer(buffer, lineterminator="\n")
-        csvwriter.writerow(self.headers)
-        csvwriter.writerows(self.data)
-        self.writefile(buffer.getvalue())
+        csvWriter = csv.writer(buffer, lineterminator="\n")
+        csvWriter.writerow(self.headers)
+        csvWriter.writerows(self.data)
+        self.writeFile(buffer.getvalue())
 
     @property
     def headers(self) -> list:
@@ -112,53 +112,52 @@ class DatabaseCSV(Database):
 class DatabaseFolder:
     def __init__(self,
         folderName: str,
-        databaseType: typing.Type[Database] = DatabaseJSON,
-        compress: bool = False,
         password: str = None,
-        saveAtExit: bool = True
+        compression = None,
+        saveAtExit: bool = True,
+        dbType: typing.Type[Database] = DatabaseJSON
     ):
         self.folderName = folderName
-        self.databaseType = databaseType
-        self.compress = compress
         self.password = password
+        self.compression = compression
         self.saveAtExit = saveAtExit
+        self.dbType = dbType
 
         if not os.path.isdir(self.folderName):
             os.mkdir(self.folderName)
 
     def database(self, fileName: str) -> typing.Type[Database]:
-        return self.databaseType(
+        return self.dbType(
             os.path.join(self.folderName, fileName),
-            self.compress,
             self.password,
+            self.compression,
             self.saveAtExit
         )
 
 
 if __name__ == "__main__":
-    compress, password = False, None
-
+    p, c = None, None
     h = ["firstname", "lastname", "age"]
     d = [[f"fn{i}", f"ln{i}", i] for i in range(1000)]
 
-    db = Database("database", compress, password)
+    db = Database("database", p, c)
     db["headers"] = h
     db["data"] = d
     db.commit()
 
-    dbjson = DatabaseJSON("databasejson", compress, password)
+    dbjson = DatabaseJSON("databasejson", p, c)
     dbjson["headers"] = h
     dbjson["data"] = d
     dbjson.commit()
 
-    dbcsv = DatabaseCSV("databasecsv", compress, password)
+    dbcsv = DatabaseCSV("databasecsv", p, c)
     dbcsv.headers = h
     dbcsv.data = d
     dbcsv.commit()
 
-    dbfolder = DatabaseFolder("datafolder", DatabaseJSON, compress, password)
-    f1 = dbfolder.database("file1")
-    f1["headers"] = h
-    f1["data"] = d
-    f1.commit()
+    dbfolder = DatabaseFolder("databasefolder", p, c)
+    db1 = dbfolder.database("database1")
+    db1["headers"] = h
+    db1["data"] = d
+    db1.commit()
 

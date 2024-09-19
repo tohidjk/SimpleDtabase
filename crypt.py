@@ -1,7 +1,6 @@
 """
 Simple Encrypt/Decrypt Data With Password
 Martijn Pietres (stackoverflow.com)
-edit by tohid.jk
 2023-03-22
 """
 
