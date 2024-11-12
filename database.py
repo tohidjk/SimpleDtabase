@@ -1,75 +1,98 @@
 """
 Database File
 Copyright 2023-2024 tohid.jk
-License GNU GPLv2 or later
-2024-09-19
+License GNU GPLv3
+2024-11-12
 """
 
-
 import os
-import atexit
-import typing
 import io
+import zipfile
 
+# Database File Type
+import xmltodict
 import json
+import yaml
 import csv
 
+# fileCompressionClass
+import lzma
+import bz2
+import gzip
+import zlib
+
 import crypt as encryption
-import lzma, bz2, gzip, zlib # compression
 
-
-class Database(typing.Dict):
+class Database(dict):
     def __init__(self,
-        fileName: str,
-        password: str = None,
-        compression = None,
+        file, # filename string or read+write bytes stream
+        filePassword: bytes = None,
+        fileCompressionClass = None,
         saveAtExit: bool = True
     ):
-        self.fileName = fileName
-        self.password = password
-        self.compression = compression
+        self.file = file
+        self.filePassword = filePassword
+        self.fileCompressionClass = fileCompressionClass
         self.saveAtExit = saveAtExit
 
-        if os.path.isfile(self.fileName):
+        # filename string -> read+write bytes stream
+        if isinstance(self.file, str):
+            self.file = open(self.file, "a+b")
+
+        # check file size
+        self.file.seek(0, os.SEEK_END)
+        if self.file.tell() > 0:
             self.read()
 
+    def __del__(self):
         if self.saveAtExit:
-            atexit.register(self.write)
+            self.commit()
 
     def readFile(self) -> str:
-        data = None
-        with open(self.fileName, "rb") as file:
-            data = file.read()
+        self.file.seek(0)
+        data = self.file.read()
 
-        if self.password != None:
-            data = encryption.decrypt(data, self.password)
+        if self.filePassword != None:
+            data = encryption.decrypt(data, self.filePassword)
 
-        if self.compression != None:
-            data = self.compression.decompress(data)
+        if self.fileCompressionClass != None:
+            data = self.fileCompressionClass.decompress(data)
 
         return data.decode()
 
     def writeFile(self, data: str) -> None:
         data = data.encode()
 
-        if self.compression != None:
-            data = self.compression.compress(data)
+        if self.fileCompressionClass != None:
+            data = self.fileCompressionClass.compress(data)
 
-        if self.password != None:
-            data = encryption.encrypt(data, self.password)
+        if self.filePassword != None:
+            data = encryption.encrypt(data, self.filePassword)
 
-        with open(self.fileName, "wb") as file:
-            file.write(data)
+        self.file.truncate(0)
+        self.file.write(data)
 
     def read(self) -> None:
         self.clear()
         self.update(eval(self.readFile()))
 
     def write(self) -> None:
-        self.writeFile(self.__str__())
+        self.writeFile(str(self))
 
     def commit(self) -> None:
         self.write()
+
+class DatabaseXML(Database):
+    rootTag = "root"
+
+    def read(self) -> None:
+        self.clear()
+        self.update(xmltodict.parse(self.readFile())[self.rootTag])
+
+    def write(self) -> None:
+        self.writeFile(xmltodict.unparse(
+            {self.rootTag : self}, pretty=True, short_empty_elements=True
+        ))
 
 class DatabaseJSON(Database):
     def read(self) -> None:
@@ -79,19 +102,31 @@ class DatabaseJSON(Database):
     def write(self) -> None:
         self.writeFile(json.dumps(self, indent="\t"))
 
+class DatabaseYAML(Database):
+    def read(self) -> None:
+        self.clear()
+        stream = io.StringIO(self.readFile())
+        self.update(yaml.safe_load(stream))
+
+    def write(self) -> None:
+        stream = io.StringIO()
+        yaml.dump(dict(self), stream)
+        self.writeFile(stream.getvalue())
+
 class DatabaseCSV(Database):
     def read(self) -> None:
-        buffer = io.StringIO(self.readFile())
-        csvReader = csv.reader(buffer)
+        self.clear()
+        stream = io.StringIO(self.readFile())
+        csvReader = csv.reader(stream)
         self.headers = next(csvReader, list())
         self.data = list(csvReader)
 
     def write(self) -> None:
-        buffer = io.StringIO()
-        csvWriter = csv.writer(buffer, lineterminator="\n")
+        stream = io.StringIO()
+        csvWriter = csv.writer(stream, lineterminator="\n")
         csvWriter.writerow(self.headers)
         csvWriter.writerows(self.data)
-        self.writeFile(buffer.getvalue())
+        self.writeFile(stream.getvalue())
 
     @property
     def headers(self) -> list:
@@ -109,55 +144,125 @@ class DatabaseCSV(Database):
     def data(self, value: list) -> None:
         self.update({"data" : value})
 
-class DatabaseFolder:
+class DatabaseFolder(dict):
     def __init__(self,
         folderName: str,
-        password: str = None,
-        compression = None,
+        filePassword: bytes = None,
+        fileCompressionClass = None,
         saveAtExit: bool = True,
-        dbType: typing.Type[Database] = DatabaseJSON
+        dbClass: Database = DatabaseJSON
     ):
         self.folderName = folderName
-        self.password = password
-        self.compression = compression
+        self.filePassword = filePassword
+        self.fileCompressionClass = fileCompressionClass
         self.saveAtExit = saveAtExit
-        self.dbType = dbType
+        self.dbClass = dbClass
 
-        if not os.path.isdir(self.folderName):
+        if os.path.isdir(self.folderName):
+            self.read()
+        else:
             os.mkdir(self.folderName)
 
-    def database(self, fileName: str) -> typing.Type[Database]:
-        return self.dbType(
+    def read(self) -> None:
+        for entry in os.scandir(self.folderName):
+            if entry.is_file():
+                self.new(entry.name)
+
+    def new(self, fileName: str) -> Database:
+        db = self.dbClass(
             os.path.join(self.folderName, fileName),
-            self.password,
-            self.compression,
+            self.filePassword,
+            self.fileCompressionClass,
             self.saveAtExit
         )
+        self.update({fileName : db})
+        return db
 
+class DatabaseZip(dict):
+    def __init__(self,
+        zipName: str,
+        filePassword: bytes = None,
+        fileCompressionClass = None,
+        saveAtExit: bool = True,
+        dbClass: Database = DatabaseJSON
+    ):
+        self.zipName = zipName
+        self.filePassword = filePassword
+        self.fileCompressionClass = fileCompressionClass
+        self.saveAtExit = saveAtExit
+        self.dbClass = dbClass
 
-if __name__ == "__main__":
-    p, c = None, None
+        if zipfile.is_zipfile(self.zipName):
+            self.read()
+
+    def __del__(self):
+        if self.saveAtExit:
+            self.commit()
+
+    def read(self) -> None:
+        self.clear()
+
+        with zipfile.ZipFile(self.zipName, "r") as archive:
+            for fileName in archive.namelist():
+                self.new(fileName, archive.read(fileName))
+
+    def new(self, fileName: str, data: bytes = None) -> Database:
+        db = self.dbClass(
+            io.BytesIO(data),
+            self.filePassword,
+            self.fileCompressionClass,
+            self.saveAtExit
+        )
+        self.update({fileName : db})
+        return db
+
+    def write(self) -> None:
+        if os.path.isfile(self.zipName):
+            os.remove(self.zipName)
+
+        with zipfile.ZipFile(self.zipName, "w") as archive:
+            for fileName, db in self.items():
+                db.commit()
+                archive.writestr(fileName, db.file.getvalue())
+
+    def commit(self) -> None:
+        self.write()
+
+def test():
+    p, c = b"1234", lzma
     h = ["firstname", "lastname", "age"]
     d = [[f"fn{i}", f"ln{i}", i] for i in range(1000)]
 
     db = Database("database", p, c)
     db["headers"] = h
     db["data"] = d
-    db.commit()
 
-    dbjson = DatabaseJSON("databasejson", p, c)
+    dbxml = DatabaseXML("database.xml", p, c)
+    dbxml["headers"] = h
+    dbxml["data"] = d
+
+    dbjson = DatabaseJSON("database.json", p, c)
     dbjson["headers"] = h
     dbjson["data"] = d
-    dbjson.commit()
 
-    dbcsv = DatabaseCSV("databasecsv", p, c)
+    dbyaml = DatabaseYAML("database.yaml", p, c)
+    dbyaml["headers"] = h
+    dbyaml["data"] = d
+
+    dbcsv = DatabaseCSV("database.csv", p, c)
     dbcsv.headers = h
     dbcsv.data = d
-    dbcsv.commit()
 
     dbfolder = DatabaseFolder("databasefolder", p, c)
-    db1 = dbfolder.database("database1")
+    db1 = dbfolder.new("database1")
     db1["headers"] = h
     db1["data"] = d
-    db1.commit()
+
+    dbzip = DatabaseZip("database.zip", p, c)
+    db1 = dbzip.new("database1")
+    db1["headers"] = h
+    db1["data"] = d
+
+if __name__ == "__main__":
+    test()
 
